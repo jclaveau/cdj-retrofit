@@ -1,4 +1,4 @@
-#include <Regexp.h>
+// #include <Regexp.h>
 
 // https://playground.arduino.cc/Code/TaskScheduler/
 // https://github.com/arkhipenko/TaskScheduler/wiki/API-Task#void-setinterval-unsigned-long-ainterval
@@ -13,6 +13,20 @@
 // #include "language-tools.h"
 #include "SPI.h"
 
+typedef void (*NoParamFunction) ();
+String blankString;
+
+const uint8_t SHADE_OF_GREY_COUNT = 16; // Bug over 27 on Arduino Leonardo
+const uint8_t DISPLAY_FRAME_LENGTH = 16;
+typedef uint8_t DisplayFrame[SHADE_OF_GREY_COUNT][DISPLAY_FRAME_LENGTH];
+
+// const bool BLINK_ON = LOW;
+// const bool BLINK_OFF = HIGH;
+
+const bool BLINK_ON = HIGH;
+const bool BLINK_OFF = LOW;
+
+
 void printLine()
 {
   Serial.println();
@@ -25,32 +39,7 @@ void printLine(T first, Types... other)
   printLine(other...) ;
 }
 
-
-// unsigned long msBefore;
-// unsigned long loopTime;
-// bool clockPinState = false;
-
-String serialInput;
-
-
-
-int frameLength = 16;
-int frameStart = 2;
-int frameValues[64] = { // > 16 for experiments
-  0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  // 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  // 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-};
-
-int frameSentValues[64] = { // > 16 for experiments
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-};
+String serialInput = "";
 
 int middleFrame[16] = { // > 16 for experiments
   104, // 01101000
@@ -67,7 +56,7 @@ int middleFrame[16] = { // > 16 for experiments
 
 Scheduler ts;
 Task commandHandlerTask(
-  1 * TASK_IMMEDIATE,
+  1000,
   TASK_FOREVER,
   &handleSerialCommand,
   &ts,
@@ -76,34 +65,26 @@ Task commandHandlerTask(
   &stopHandlingSerialCommand
 );
 
-Task renderDisplayTask(
-  TASK_ONCE, // delay defined betwee, each non blocking step
+Task animationTask(
+  200000,
   TASK_FOREVER,
+  &startAnimation,
+  &ts,
+  false,
+  NULL,
+  &stopAnimation
+);
+
+Task renderDisplayTask(
+  // 1000,
+  TASK_ONCE, // delay defined between, each non blocking step
+  TASK_FOREVER,
+  // 1000,
   &renderJogDisplayLeft,
   &ts,
   false,
   NULL,
   &stopRenderingJogDisplaySPI
-);
-
-Task blinkPinTask(
-  TASK_ONCE, // delay defined betwee, each non blocking step
-  TASK_FOREVER,
-  &blinkPin,
-  &ts,
-  false,
-  NULL,
-  &stopBlinkingPin
-);
-
-Task latencyTask(
-  TASK_ONCE,
-  TASK_ONCE,
-  &startLatency,
-  &ts,
-  false,
-  NULL,
-  &stopLatency
 );
 
 
@@ -114,6 +95,8 @@ void setup() {
   setupSerialCommand();
   setupJogDisplaySPI();
 
+  prepareFrames();
+  generateFramesFromConfig();
   ts.enableAll();
 }
 
@@ -123,28 +106,20 @@ void loop() {
 
 
 void setupJogDisplaySPI() {
-  // SPI.setClockDivider(SPI_CLOCK_DIV128);
   SPI.begin();
   SPI.beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
 }
 
-#define DISPLAY_LEFT 2
-#define DISPLAY_MIDDLE 4
-#define DISPLAY_RIGHT 8
-int displaySide = DISPLAY_LEFT;
-int renderPeriod = 6000; // 10ms is blinking and below reduces contrast with black ones
-
-
-#define VINYL_LEFT 2;
-#define VINYL_RIGHT 4;
-#define VINYL_ON 8;
-#define VINYL_OFF 16;
 
 struct Config {
   int renderPeriod;
-  int blinkPeriod;
+  int blinkOnDuration;
+  int blinkOffDuration;
+  int shadesOfGrey;
   int renderRatios[3];
   int renderRatiosSum;
+  int latencyDuration;
+  int latencySpacing;
   int vinyl[2];
   int circleIn[2];
   int circleOut[2];
@@ -152,122 +127,113 @@ struct Config {
   int redPixels[88];
 } config = {
   200, // full render period
-  10,
+  // 50, 50,
+  1, 100,
+  SHADE_OF_GREY_COUNT, // TODO fix it
   // {4, 4, 2},
   {5, 5, 0},
   10,
-  {0, 0},
-  {0, 0},
-  {0, 0},
+  1, // latency duration
+  0, // 1 by side? depending on shades of grey (3 => 15 shades)
+  {SHADE_OF_GREY_COUNT, 1},
+  {1, SHADE_OF_GREY_COUNT},
+  {SHADE_OF_GREY_COUNT, SHADE_OF_GREY_COUNT},
   0,
   0,
 };
 
-// int leftFrameInt[16] = {B01100000};
-// int rightFrameInt[16] = {B01100000};
 
-// With shades of grey
+void dumpConfigToSerial() {
+  Serial.println(blankString +
+      "renderPeriod: " + config.renderPeriod + "ms\n"
+    + "blinkOnDuration: " + config.blinkOnDuration + "ms\n"
+    + "blinkOffDuration: " + config.blinkOffDuration + "ms\n"
+    + "shadesOfGrey: " + config.shadesOfGrey + "\n"
+    + "latency: " + config.latencySpacing + ", " + config.latencyDuration + "us\n"
+    + "vinyl: " + config.vinyl[0] + " " + config.vinyl[1] + "\n"
+    + "circleIn: " + config.circleIn[0] + " " + config.circleIn[1] + "\n"
+    + "circleOut: " + config.circleOut[0] + " " + config.circleOut[1] + "\n"
+  );
 
-const uint8_t SHADE_OF_GREY_COUNT = 8;
-uint8_t leftFrame[SHADE_OF_GREY_COUNT][16]  = {
-  {B00100000},
-  {B00100000},
-  {B00100000},
-  {B00100000},
-  {B00100000},
-  {B00100000},
-  {B00100000},
-  {B00100000}
-};
-uint8_t rightFrame[SHADE_OF_GREY_COUNT][16] = {
-  {B01000000},
-  {B01000000},
-  {B01000000},
-  {B01000000},
-  {B01000000},
-  {B01000000},
-  {B01000000},
-  {B01000000}
-};
+  // Serial.print("bluePixels: "); Serial.println(config.bluePixels);
+  // Serial.print("redPixels: "); Serial.println(config.redPixels);
+}
+
+DisplayFrame leftFrame  = {};
+DisplayFrame rightFrame = {};
+// TODO mid frame
+
+void prepareFrames() {
+  for (int i=0; i < SHADE_OF_GREY_COUNT; i++) {
+    leftFrame[i][0]  = B00100000;
+    rightFrame[i][0] = B01000000;
+  }
+}
 
 // RENDERING
 int currentShadeOfGrey = 0;
+NoParamFunction afterBlinkStep;
+
+
+
+int renderLeftStartTime = 0;
+int renderLeftEndTime = 0;
+int blinkOnStartTime = 0;
+int blinkOnEndTime = 0;
+int blinkOffStartTime = 0;
+int blinkOffEndTime = 0;
+int currentRenderStartTime = 0;
+
+int renderLeftStartTimeTmp = 0;
+int renderLeftEndTimeTmp = 0;
+int blinkOnStartTimeTmp = 0;
+int blinkOnEndTimeTmp = 0;
+int blinkOffStartTimeTmp = 0;
+int blinkOffEndTimeTmp = 0;
+uint8_t renderCount=0;
+
+
 void renderJogDisplayLeft() {
+  currentRenderStartTime = micros();
+  digitalWrite(13, BLINK_ON);
+  renderDisplayTask.delay(config.blinkOffDuration);
 
-  // generateFramesFromConfig();
+  renderLeftStartTime = renderLeftStartTimeTmp;
+  renderLeftEndTime = renderLeftEndTimeTmp;
+  blinkOnStartTime = blinkOnStartTimeTmp;
+  blinkOnEndTime = blinkOnEndTimeTmp;
+  blinkOffStartTime = blinkOffStartTimeTmp;
+  blinkOffEndTime = blinkOffEndTimeTmp;
 
-  renderDisplayTask.delay(config.renderPeriod * config.renderRatios[0] / config.renderRatiosSum);
+  renderLeftStartTimeTmp = micros();
 
-  // int mask = B10111111; // Right side off
-  // uint8_t mask = B10111111; // Right side off
+  renderDisplayTask.setCallback(blink);
+  // afterBlinkStep = renderJogDisplayLeft;
+  afterBlinkStep = renderJogDisplayRight;
 
-  // uint8_t frameToSend[16];
-  // for (int i = 0; i < 16; i++) {
-  //   int valueToTransfer = leftFrame[currentShadeOfGrey][i];
-  //   // if (i == 0) {
-  //   //   valueToTransfer &= mask;
-  //   // }
-
-  //   frameToSend[i] = valueToTransfer;
-  //   // SPI.transfer(valueToTransfer);
-  // }
-  // SPI.transfer(frameToSend, 16);
-  // SPI.transfer(leftFrame[currentShadeOfGrey], 16);
   uint8_t frameToSend[16];
-  memcpy(frameToSend, leftFrame[currentShadeOfGrey], 16);
+  memcpy(frameToSend, leftFrame[currentShadeOfGrey], 16); // avoid memcpy?
   SPI.transfer(frameToSend, 16);
 
-  renderDisplayTask.setCallback(renderMiddlePixels);
-  // renderDisplayTask.setCallback(renderJogDisplayRight);
+
+  renderLeftEndTimeTmp = micros();
+  triggerLatency();
 }
 
 void renderJogDisplayRight() {
-  renderDisplayTask.delay(config.renderPeriod * config.renderRatios[1] / config.renderRatiosSum);
+  digitalWrite(13, BLINK_ON);
+  renderDisplayTask.delay(config.blinkOffDuration);
+  renderDisplayTask.setCallback(blink);
+  // afterBlinkStep = renderJogDisplayLeft;
+  afterBlinkStep = renderMiddlePixels;
 
-  // int mask = B11011111;  // Left side off
-  // uint8_t mask = B11011111;  // Left side off
-
-  // uint8_t frameToSend[16];
-
-  // for (int i = 0; i < 16; i++) {
-  //   int valueToTransfer = rightFrame[currentShadeOfGrey][i];
-  //   // if (i == 0) {
-  //   //   valueToTransfer &= mask;
-  //   // }
-
-  //   frameToSend[i] = valueToTransfer;
-
-  //   // SPI.transfer(valueToTransfer);
-  // }
-  // SPI.transfer(frameToSend, 16);
 
   uint8_t frameToSend[16];
   memcpy(frameToSend, rightFrame[currentShadeOfGrey], 16);
   SPI.transfer(frameToSend, 16);
-
-
-  // if (currentShadeOfGrey > SHADE_OF_GREY_COUNT - 1) {
-  if (currentShadeOfGrey > 4 - 1) {
-    currentShadeOfGrey = 0;
-  } else {
-    currentShadeOfGrey++;
-  }
-
-  renderDisplayTask.setCallback(renderJogDisplayLeft);
+  triggerLatency();
 }
 
-// void sendSPIFrame(uint8_t mask, ) {
-
-//   for (int i = 0; i < 16; i++) {
-//     int valueToTransfer = rightFrame[currentShadeOfGrey][i];
-//     if (i == 0) {
-//       valueToTransfer &= mask;
-//     }
-
-//     SPI.transfer(valueToTransfer);
-//   }
-
-// }
 
 
 /**
@@ -275,29 +241,30 @@ void renderJogDisplayRight() {
  * for a short time to smooth the loss of light due to left/right masking
  */
 void renderMiddlePixels() {
-  renderDisplayTask.delay(config.renderPeriod * config.renderRatios[2] / config.renderRatiosSum);
+  digitalWrite(13, BLINK_ON);
+  renderDisplayTask.setCallback(blink);
+  renderDisplayTask.delay(config.blinkOffDuration);
+  afterBlinkStep = renderJogDisplayLeft;
 
-  if (config.renderRatios[2] != 0) {
-    uint8_t frameToSend[16];
-    for (int i = 0; i < 16; i++) {
-      frameToSend[i] = middleFrame[i];
-      if (i == 0 || i == 1 ||  i == 3 || i == 13 || i == 15) {
-        frameToSend[i] = middleFrame[i]
-          & ( leftFrame[currentShadeOfGrey][i]
-            | rightFrame[currentShadeOfGrey][i]
-          );
-      }
+  // TODO display mid pixels only here
+  // Top blue
+  // top red
+  // vinyl
+  // bottom red
+  // bottom blue
+  uint8_t frameToSend[16];
+  for (int i = 0; i < 16; i++) {
+    frameToSend[i] = middleFrame[i];
+    if (i == 0 || i == 1 ||  i == 3 || i == 13 || i == 15) {
+      frameToSend[i] = middleFrame[i]
+        & ( leftFrame[currentShadeOfGrey][i]
+          | rightFrame[currentShadeOfGrey][i]
+        );
     }
-    SPI.transfer(frameToSend, 16);
   }
+  SPI.transfer(frameToSend, 16);
 
-  // if (currentShadeOfGrey > SHADE_OF_GREY_COUNT - 1) {
-  //   currentShadeOfGrey = 0;
-  // } else {
-  //   currentShadeOfGrey++;
-  // }
-
-  renderDisplayTask.setCallback(renderJogDisplayRight);
+  triggerLatency();
 }
 
 
@@ -305,34 +272,120 @@ void stopRenderingJogDisplaySPI() {
   Serial.println("stopRenderingJogDisplaySPI");
 }
 
-bool blinkState=false;
-void blinkPin() {
-  // HIGH / LOW
-  blinkState = ! blinkState;
-  digitalWrite(13, blinkState);
+void triggerLatency() {
+  if (renderCount >= config.latencySpacing) {
+    // renderDisplayTask.setCallback(startLatency);
+    // renderDisplayTask.setCallback(afterBlinkStep);
+    renderCount = 0;
+    startLatency();
+  }
+  else {
+    renderCount++;
+    // renderDisplayTask.setCallback(afterBlinkStep);
+    blink();
+  }
 }
 
-void stopBlinkingPin() {
-  blinkState = true;
+// TODO latency during blink?
+void blink() {
+  currentShadeOfGrey++;
+  if (currentShadeOfGrey >= config.shadesOfGrey) {
+    currentShadeOfGrey = 0;
+  }
+
+
+  blinkOnStartTimeTmp = micros();
+  renderDisplayTask.delay(config.blinkOnDuration);
+  digitalWrite(13, BLINK_OFF);
+  // if (blinkCount >= config.latencySpacing) {
+  //   renderDisplayTask.setCallback(startLatency);
+  //   // renderDisplayTask.setCallback(afterBlinkStep);
+  //   blinkCount = 0;
+  // }
+  // else {
+  //   blinkCount++;
+  //   renderDisplayTask.setCallback(afterBlinkStep);
+  // }
+  renderDisplayTask.setCallback(afterBlinkStep);
+  blinkOnEndTimeTmp = micros();
 }
 
 
 
-
-// bool latencyState=false;
 void startLatency() {
-  // HIGH / LOW
-  // latencyState = ! latencyState;
-  // digitalWrite(6, latencyState);
-  digitalWrite(6, LOW);
-  printLine("Latency started");
+  if (config.latencyDuration <= 0) {
+    blink();
+    return;
+  }
+  digitalWrite(6, HIGH);
+  // // printLine("Latency started");
+  renderDisplayTask.delay(config.latencyDuration);
+  if (config.latencyDuration <= 13) {
+    stopLatency();
+  }
+  else if (config.latencyDuration <= 26) {
+    digitalWrite(6, HIGH);
+    stopLatency();
+  }
+  else if (config.latencyDuration <= 39) {
+    digitalWrite(6, HIGH);
+    digitalWrite(6, HIGH);
+    stopLatency();
+  }
+  else {
+    renderDisplayTask.setCallback(stopLatency);
+  }
 }
 
 void stopLatency() {
-  digitalWrite(6, HIGH);
-  printLine("Latency stopped");
+  // delay(500);
+  digitalWrite(6, LOW);
+  // // printLine("Latency stopped");
+  renderDisplayTask.setCallback(blink);
+  // renderDisplayTask.delay(16000);
 }
 
+uint8_t animationStep = 0;
+bool animationDirection = true;
+void startAnimation() {
+  // return;
+  if (animationDirection) {
+    config.circleIn[0] = animationStep;
+    config.circleIn[1] = config.shadesOfGrey - animationStep;
+  }
+  else {
+    config.circleIn[0] = config.shadesOfGrey - animationStep;
+    config.circleIn[1] = animationStep;
+  }
+  generateFramesFromConfig();
+  if (animationStep == config.shadesOfGrey) {
+    animationDirection = !animationDirection;
+    animationStep = 0;
+  }
+  else {
+    animationStep++;
+  }
+}
+
+void stopAnimation() {
+}
+
+void dumpFrameToSerial(DisplayFrame frame) {
+  for (int i = 0; i < SHADE_OF_GREY_COUNT; i++) {
+    Serial.print(blankString +
+      "Grey " + i + " => "
+    );
+    dumpSPIFrameToSerial(frame[i]);
+    Serial.println();
+  }
+}
+
+void dumpSPIFrameToSerial(uint8_t frame[16]) {
+  Serial.print(byteToString(frame[0]));
+  for (int j = 1; j < 16; j++) {
+    Serial.print(','); Serial.print(frame[j]);
+  }
+}
 
 
 // COMMANDS
@@ -343,139 +396,156 @@ void setupSerialCommand() {
   Serial.setTimeout(0);
 }
 
+// Required for arduino mega as readStringUntil() returns one char by one char
+String readSerialInput() {
+  if (Serial.available()) {
+    char c = (char) Serial.read();
+    if (c == '\n' || c == '\r') {
+      String copy = String(serialInput);
+      serialInput = String();
+      return copy;
+    }
+    else {
+      serialInput += c;
+    }
+  }
+  return String();
+}
+
+// Hand made readStringUntil
+String readSerialStringUntil(String& serialLine, char delimiter) {
+  int index = serialLine.indexOf(delimiter);
+  if (index == -1) {
+    index = serialLine.length();
+  }
+  // Serial.println(index);
+
+  String out = serialLine.substring(0, index);
+  // Serial.println(out);
+  if (index == serialLine.length()) {
+    serialLine = String();
+  }
+  else {
+    serialLine.remove(0, index+1);
+    // serialLine = serialLine.substring(index+1, serialLine.length());
+  }
+  // Serial.print("Reste: '"); Serial.print(serialLine); Serial.println("'");
+  return out;
+}
+
 void handleSerialCommand() {
-  if(Serial.available() > 0) {
-    /** Todo
-     * Split commands by
-     * + config
-     *   + debug: dump frames,
-     *   +
-     */
-    printLine("Command: ");
+  String serialLine = readSerialInput();
 
-    String command = Serial.readStringUntil(':');
+  if(serialLine.length()) {
+
+    String command = readSerialStringUntil(serialLine, ':');
     command.trim();
-    if (command == "blink") {
-      String period = Serial.readStringUntil(',');
-      String delay = Serial.readStringUntil(',');
-      period.trim();
-      delay.trim();
+    Serial.print(blankString +
+      "Command: " + command + "\n"
+    );
 
-      // TODO phase par rapport au render
-      blinkPinTask.setInterval(period.toInt());
+    // return;
 
-      if (delay != "") {
-        printLine("Delay set to ", delay);
-        blinkPinTask.delay(delay.toInt());
+    if (command == "time") {
+      Serial.print(blankString +
+          "Render duration left: " + (blinkOnStartTime - renderLeftStartTime) + " us\n"
+        + "Blink duration: " + (currentRenderStartTime - blinkOnStartTime) + " us\n"
+      );
+    }
+    else if (command == "dump") {
+      printLine("Left Frames: ");
+      dumpFrameToSerial(leftFrame);
+
+      printLine("Right Frames: ");
+      dumpFrameToSerial(rightFrame);
+    }
+    else if (command == "config") {
+      dumpConfigToSerial();
+    }
+    else if (command == "blink") {
+      String on = readSerialStringUntil(serialLine, ',');
+      String off = readSerialStringUntil(serialLine, ',');
+      on.trim();
+      off.trim();
+      config.blinkOnDuration = on.toInt();
+      config.blinkOffDuration = off.toInt();
+    }
+    else if (command == "shades") {
+      String numberOfShadesStr = readSerialStringUntil(serialLine, ',');
+      numberOfShadesStr.trim();
+      int numberOfShades = numberOfShadesStr.toInt();
+      if (numberOfShades >= SHADE_OF_GREY_COUNT) {
+        numberOfShades = SHADE_OF_GREY_COUNT;
       }
+      config.shadesOfGrey = numberOfShades;
     }
     else if (command == "latency") {
-      long latency = Serial.parseInt();
-      printLine("Latency set to ", latency, " ms");
-
-      latencyTask.setInterval(latency * 1000);
-      latencyTask.setIterations(2 * TASK_ONCE); // We need 2 runs to wait for an interval
-      latencyTask.restart();
-
-      // TODO investigate phase / render for darek pixels
+      String spacing = readSerialStringUntil(serialLine, ',');
+      String duration = readSerialStringUntil(serialLine, ',');
+      spacing.trim();
+      duration.trim();
+      config.latencyDuration = duration.toInt();
+      config.latencySpacing = spacing.toInt();
     }
-    else if (command == "period") {
-      config.renderPeriod = Serial.parseInt();
-
-      float leftTime   = config.renderPeriod * config.renderRatios[0] / config.renderRatiosSum;
-      float rightTime  = config.renderPeriod * config.renderRatios[1] / config.renderRatiosSum;
-      float middleTime = config.renderPeriod * config.renderRatios[2] / config.renderRatiosSum;
-      Serial.print("Left time: "); Serial.print(leftTime); Serial.println(" ms");
-      Serial.print("Right time: "); Serial.print(rightTime); Serial.println(" ms");
-      Serial.print("Middle time: "); Serial.print(middleTime); Serial.println(" ms");
-    }
-    else if (command == "render_ratios") {
-      String leftRatio = Serial.readStringUntil(',');
-      String rightRatio = Serial.readStringUntil(',');
-      String middleRatio = Serial.readStringUntil(',');
-      leftRatio.trim();
-      rightRatio.trim();
-      middleRatio.trim();
-
-      config.renderRatios[0] = leftRatio.toInt();
-      config.renderRatios[1] = rightRatio.toInt();
-      config.renderRatios[2] = middleRatio.toInt();
-    }
-    // TODO latency
     else if (command == "vinyl") {
       String values[2] = {
-        Serial.readStringUntil(','),
-        Serial.readStringUntil(','),
+        readSerialStringUntil(serialLine, ','),
+        readSerialStringUntil(serialLine, ','),
       };
       values[0].trim();
       values[1].trim();
-      // printLine("VINYL!!!", values[0], ", ", values[1]);
 
       config.vinyl[0] = values[0].toInt();
       config.vinyl[1] = values[1].toInt();
-
-      // char out[30];
-      // snprintf(out, 30, "%d,%d,%d", out1, out2, out3);
-
-      Serial.print("vinyl: ");
-      Serial.print(config.vinyl[0]);
-      Serial.print(", ");
-      Serial.println(config.vinyl[1]);
     }
     else if (command == "circle_in") {
       String values[2] = {
-        Serial.readStringUntil(','),
-        Serial.readStringUntil(','),
+        readSerialStringUntil(serialLine, ','),
+        readSerialStringUntil(serialLine, ','),
       };
       values[0].trim();
       values[1].trim();
 
       config.circleIn[0] = values[0].toInt();
       config.circleIn[1] = values[1].toInt();
-
-      // char out[30];
-      // snprintf(out, 30, "%d,%d,%d", out1, out2, out3);
-
-      Serial.print("circle_in: ");
-      Serial.print(config.circleIn[0]);
-      Serial.print(", ");
-      Serial.println(config.circleIn[1]);
     }
     else if (command == "circle_out") {
       String values[2] = {
-        Serial.readStringUntil(','),
-        Serial.readStringUntil(','),
+        readSerialStringUntil(serialLine, ','),
+        readSerialStringUntil(serialLine, ','),
       };
       values[0].trim();
       values[1].trim();
 
       config.circleOut[0] = values[0].toInt();
       config.circleOut[1] = values[1].toInt();
-      Serial.print("circle_out: ");
-      Serial.print(config.circleOut[0]);
-      Serial.print(", ");
-      Serial.println(config.circleOut[1]);
     }
     else if (command == "blue_pixels") {
-      String list = Serial.readStringUntil('\n');
-      int length = parseCommandList((char *) list.c_str(), config.bluePixels);
-      if (length == -1) {
-        length = parseCommandRange((char *) list.c_str(), config.bluePixels);
-      }
+      String list = readSerialStringUntil(serialLine, '\n');
+      uint8_t length = parseCommandRange(list, config.bluePixels);
+
+
+      // uint8_t length = parseCommandList((char *) list.c_str(), config.bluePixels);
+      // if (length == -1) {
+      //   length = parseCommandRange((char *) list.c_str(), config.bluePixels);
+      // }
     }
     else if (command == "red_pixels") {
-      String list = Serial.readStringUntil('\n');
-      int length = parseCommandList((char *) list.c_str(), config.redPixels);
-      if (length == -1) {
-        length = parseCommandRange((char *) list.c_str(), config.redPixels);
-      }
+      String list = readSerialStringUntil(serialLine, '\n');
+
+      uint8_t length = parseCommandRange(list, config.redPixels);
+
+      // uint8_t length = parseCommandList((char *) list.c_str(), config.redPixels);
+      // if (length == -1) {
+      //   length = parseCommandRange((char *) list.c_str(), config.redPixels);
+      // }
     }
 
     generateFramesFromConfig();
 
     if (command == "frame") {
       int inputLength = 0;
-      while (String numericValue = Serial.readStringUntil(':')) {
+      while (String numericValue = readSerialStringUntil(serialLine, ':')) {
         numericValue.trim();
         // printLine("numericValue: ", numericValue);
         if (numericValue == "") {
@@ -490,58 +560,41 @@ void handleSerialCommand() {
         inputLength++;
       }
     }
-    else if (command == "frame_buffer") {
-      // TODO
-    }
-
-
-    printLine("Left Frames: ");
-    for (int i = 0; i < SHADE_OF_GREY_COUNT; i++) {
-      Serial.print("Grey "); Serial.print(i);
-      Serial.print(" => ");
-      Serial.print(byteToString(leftFrame[i][0]));
-      for (int j = 1; j < 16; j++) {
-        Serial.print(','); Serial.print(leftFrame[i][j]);
-      }
-      Serial.println();
-    }
-
-    printLine("Right Frames: ");
-    for (int i = 0; i < SHADE_OF_GREY_COUNT; i++) {
-      Serial.print("Grey "); Serial.print(i);
-      Serial.print(" => ");
-      Serial.print(byteToString(rightFrame[i][0]));
-      for (int j = 1; j < 16; j++) {
-        Serial.print(','); Serial.print(rightFrame[i][j]);
-      }
-      Serial.println();
-    }
   }
 }
 
 
 
-MatchState ms;
-int parseCommandRange(char * commandString, int * values) {
-  ms.Target(commandString);
+// MatchState ms;
+int parseCommandRange(String commandString, int * values) {
+
+  Serial.println(blankString + "parseCommandRange: " +  commandString);
 
   // start => end: value
-  char result = ms.Match("%s*(%d+)%s*=>%s*(%d+)%s*:%s*(%d+)", 0);
-  int start = 0;
-  int end = 0;
-  int value = 0;
-  printLine("Range:", start, " => ", end, ": ", value);
-  if (result != REGEXP_MATCHED) {
+  uint8_t arrowPos = commandString.indexOf("=>");
+  if (arrowPos == -1) {
+    Serial.println(blankString + "No '=>' found in: " + commandString);
     return -1;
   }
+  uint8_t start = commandString.substring(0, arrowPos).toInt();
+  uint8_t end = commandString.substring(arrowPos+2).toInt();
 
-  char buffer[20];
-  ms.GetMatch(buffer);
-  start = atoi(ms.GetCapture(buffer, 0));
-  end = atoi(ms.GetCapture(buffer, 1));
-  value = atoi(ms.GetCapture(buffer, 2));
+  uint8_t colonPos = commandString.indexOf(':');
+  if (colonPos == -1) {
+    Serial.println(blankString + "No ':' found in: " + commandString);
+    return -1;
+  }
+  uint8_t value = commandString.substring(colonPos+1).toInt();
 
-  printLine("Range:", start, " => ", end, ": ", value);
+  Serial.println(blankString + "Range:" + start + " => " +  end + ": " + value);
+
+  // char buffer[20];
+  // ms.GetMatch(buffer);
+  // start = atoi(ms.GetCapture(buffer, 0));
+  // end = atoi(ms.GetCapture(buffer, 1));
+  // value = atoi(ms.GetCapture(buffer, 2));
+
+  // printLine("Range:", start, " => ", end, ": ", value);
 
   for (int i = start; i < end; i++) {
     values[i] = value;
@@ -551,6 +604,41 @@ int parseCommandRange(char * commandString, int * values) {
 }
 
 
+// MatchState ms;
+// int parseCommandRange(char * commandString, int * values) {
+//   ms.Target(commandString);
+
+//   // start => end: value
+//   char result = ms.Match("%s*(%d+)%s*=>%s*(%d+)%s*:%s*(%d+)", 0);
+//   int start = 0;
+//   int end = 0;
+//   int value = 0;
+//   printLine(commandString);
+//   printLine("Range:", start, " => ", end, ": ", value);
+//   if (result != REGEXP_MATCHED) {
+//     printLine("No match");
+//     return -1;
+//   }
+
+//   char buffer[20];
+//   ms.GetMatch(buffer);
+//   start = atoi(ms.GetCapture(buffer, 0));
+//   end = atoi(ms.GetCapture(buffer, 1));
+//   value = atoi(ms.GetCapture(buffer, 2));
+
+//   printLine("Range:", start, " => ", end, ": ", value);
+
+//   for (int i = start; i < end; i++) {
+//     values[i] = value;
+//   }
+
+//   return end - start;
+// }
+
+
+
+
+
 /**
  * Parse a command string like YY[XX,XX,XX] then save XX values
  * at the offset YY into the 'values' parameter.
@@ -558,58 +646,61 @@ int parseCommandRange(char * commandString, int * values) {
  * Returns the length of the array change.
  * Returns -1 if the commandString doesn't match the array+offset pattern
  */
-int parseCommandList(char * commandString, int * values) {
-  ms.Target(commandString);
+// int parseCommandList(char * commandString, int * values) {
+//   ms.Target(commandString);
 
-  // Extracting offset
-  char offsetResult = ms.Match ("%s*(%d+)", 0);
-  int offset = 0;
-  if (offsetResult == REGEXP_MATCHED) {
-    char offsetBuffer [4];
-    ms.GetMatch(offsetBuffer);
-    offset = atoi(ms.GetCapture (offsetBuffer, 0));
-  }
+//   // Extracting offset
+//   char offsetResult = ms.Match ("%s*(%d+)", 0);
+//   int offset = 0;
+//   if (offsetResult == REGEXP_MATCHED) {
+//     char offsetBuffer [4];
+//     ms.GetMatch(offsetBuffer);
+//     offset = atoi(ms.GetCapture (offsetBuffer, 0));
+//   }
 
-  // Extracting array values
-  char arrayResult = ms.Match(
-    "%s*%[%s*([^%]]+)%]",
-    ms.MatchStart + ms.MatchLength
-  );
+//   // Extracting array values
+//   char arrayResult = ms.Match(
+//     "%s*%[%s*([^%]]+)%]",
+//     ms.MatchStart + ms.MatchLength
+//   );
 
-  if (arrayResult != REGEXP_MATCHED) {
-    return -1;
-  }
+//   if (arrayResult != REGEXP_MATCHED) {
+//     return -1;
+//   }
 
-  char arrayBuffer [136];
-  ms.GetMatch(arrayBuffer);
-  const char * arrayPart = ms.GetCapture(arrayBuffer, 0);
+//   char arrayBuffer [136];
+//   ms.GetMatch(arrayBuffer);
+//   const char * arrayPart = ms.GetCapture(arrayBuffer, 0);
 
-  // printLine("offset: ", offset);
-  // printLine("arrayPart: ", arrayPart);
+//   // printLine("offset: ", offset);
+//   // printLine("arrayPart: ", arrayPart);
 
-  // Extracting array values
-  ms.Target((char *) arrayPart);
-  int index = 0;
-  int i = 0;
-  char valueResult;
-  char valueBuffer[8];
-  do {
-    valueResult = ms.Match ("(%d+)%s*,?%s*", index);
-    if (valueResult == REGEXP_MATCHED) {
-      // Serial.println(ms.GetMatch(valueBuffer));
-      // printLine("Captures: ", ms.level);
-      ms.GetMatch(valueBuffer);
-      for (int j = 0; j < ms.level; j++) {
-        values[offset + i] = parseBitsOrInt(ms.GetCapture(valueBuffer, j));
-        i++;
-      }
-      index = ms.MatchStart + ms.MatchLength;
-    }
-  }
-  while (valueResult == REGEXP_MATCHED);
+//   // Extracting array values
+//   ms.Target((char *) arrayPart);
+//   int index = 0;
+//   int i = 0;
+//   char valueResult;
+//   char valueBuffer[8];
+//   do {
+//     valueResult = ms.Match ("(%d+)%s*,?%s*", index);
+//     if (valueResult == REGEXP_MATCHED) {
+//       // Serial.println(ms.GetMatch(valueBuffer));
+//       // printLine("Captures: ", ms.level);
+//       ms.GetMatch(valueBuffer);
+//       for (int j = 0; j < ms.level; j++) {
+//         values[offset + i] = parseBitsOrInt(ms.GetCapture(valueBuffer, j));
+//         i++;
+//       }
+//       index = ms.MatchStart + ms.MatchLength;
+//     }
+//   }
+//   while (valueResult == REGEXP_MATCHED);
 
-  return i;
-}
+//   return i;
+// }
+
+
+
 
 void generateFramesFromConfig() {
 
@@ -631,6 +722,8 @@ void generateFramesFromConfig() {
   setFramePixelValue(leftFrame,  0, B00000010, config.circleOut[0]);
   setFramePixelValue(rightFrame, 0, B00000010, config.circleOut[1]);
 
+  // return;
+
   // RED PIXELS
   // Byte 0 => 4 mid bottom pixels
   // Byte 9 => 4 mid up pixels
@@ -640,7 +733,7 @@ void generateFramesFromConfig() {
   setFramePixelValue(rightFrame, 13, B00001000, config.redPixels[0]);
   setFramePixelValue(leftFrame, 13, B00001000, config.redPixels[0]);
 
-  for (int i = 1; i < 4; i++) { // Right side
+  for (uint8_t i = 1; i < 4; i++) { // Right side
     int onValue;
     switch (i) {
       case 1: onValue = B00010000; break;
@@ -650,21 +743,21 @@ void generateFramesFromConfig() {
     setFramePixelValue(rightFrame, 13, onValue, config.redPixels[i]);
   }
 
-  for (int i = 4; i < 40; i++) { // Right side
+  for (uint8_t i = 4; i < 40; i++) { // Right side
     // Red bytes are B10101010
-    int byteNumber;
+    uint8_t byteNumber;
     byteNumber = i / 4;
-    int bitNumber;
+    uint8_t bitNumber;
     bitNumber = i & B00000011;
 
-    int frameByteNumber;
+    uint8_t frameByteNumber;
     frameByteNumber = 11 - byteNumber;
     frameByteNumber += 2; // skip blue only bytes
     int onValue = B00000010 << (bitNumber * 2);
     setFramePixelValue(rightFrame, frameByteNumber, onValue, config.redPixels[i]);
   }
 
-  for (int i = 40; i < 43; i++) {
+  for (uint8_t i = 40; i < 43; i++) {
     // i = 40, 41, 42 (3 last right pixels)
     int onValue;
     switch (i) {
@@ -675,7 +768,7 @@ void generateFramesFromConfig() {
     setFramePixelValue(rightFrame, 3, onValue, config.redPixels[i]);
   }
 
-  for (int i = 43; i < 46; i++) {
+  for (uint8_t i = 43; i < 46; i++) {
     // i = 43, 44, 45 (3 first left pixels)
     int onValue;
     switch (i) {
@@ -687,15 +780,15 @@ void generateFramesFromConfig() {
     setFramePixelValue(leftFrame, 3, onValue, config.redPixels[i]);
   }
 
-  for (int i = 46; i < 82; i++) {
+  for (uint8_t i = 46; i < 82; i++) {
     // Left side. As there are 86 red pixels, we need an offset of 2
     // to apply masks by byte
-    int byteNumber;
+    uint8_t byteNumber;
     byteNumber = (i+2) / 4;
-    int bitNumber;
+    uint8_t bitNumber;
     bitNumber = (i+2) & B00000011;
 
-    int frameByteNumber;
+    uint8_t frameByteNumber;
     frameByteNumber = byteNumber - 10;
     frameByteNumber += 2; // skip blue only bytes
 
@@ -718,7 +811,7 @@ void generateFramesFromConfig() {
     // }
   }
 
-  for (int i = 82; i < 85; i++) {
+  for (uint8_t i = 82; i < 85; i++) {
     // i = 43, 44, 45 (3 first left pixels)
     int onValue;
     switch (i) {
@@ -733,29 +826,13 @@ void generateFramesFromConfig() {
 
 
 
-  // printLine(
-  //   "i: ", i,
-  //   " => byte: ", byteNumber, ", ", bitNumber, " => ",
-  //   frameByteNumber, ", ",
-  //   byteToString(leftFrame[frameByteNumber]), ":",
-  //   byteToString(rightFrame[frameByteNumber])
-  // );
-
-
-
   // BLEU PIXELS
-  // printLine("Blue pixels: ");
-  // for (int i = 0; i < 16; i++) {
-  //   printLine(
-  //     i, ": ", byteToString(config.bluePixels[i])
-  //   );
-  // }
   // The top middle pixel (i=0) is shared between two sides so it must be
   // set on both frames to be at full light
   setFramePixelValue(rightFrame, 15, B00000100, config.bluePixels[0]);
   setFramePixelValue(leftFrame, 15, B00000100, config.bluePixels[0]);
 
-  for (int i = 1; i < 6; i++) {
+  for (uint8_t i = 1; i < 6; i++) {
     int onValue;
     switch (i) {
       case 1: onValue = B00001000; break;
@@ -767,7 +844,7 @@ void generateFramesFromConfig() {
     setFramePixelValue(rightFrame, 15, onValue, config.bluePixels[i]);
   }
 
-  for (int i = 6; i < 14; i++) {
+  for (uint8_t i = 6; i < 14; i++) {
     int onValue;
     switch (i-6) {
       case 0: onValue = B00000001; break;
@@ -782,7 +859,7 @@ void generateFramesFromConfig() {
     setFramePixelValue(rightFrame, 14, onValue, config.bluePixels[i]);
   }
 
-  for (int i = 14; i < 16; i++) {
+  for (uint8_t i = 14; i < 16; i++) {
     int onValue;
     switch (i-14) {
       case 0: onValue = B00000100; break;
@@ -791,7 +868,7 @@ void generateFramesFromConfig() {
     setFramePixelValue(rightFrame, 13, onValue, config.bluePixels[i]);
   }
 
-  for (int i = 16; i < 52; i++) {
+  for (uint8_t i = 16; i < 52; i++) {
     int byteNumber;
     byteNumber = (i-12) / 4;
     int bitNumber;
@@ -805,7 +882,7 @@ void generateFramesFromConfig() {
     setFramePixelValue(rightFrame, frameByteNumber, onValue, config.bluePixels[i]);
   }
 
-  for (int i = 52; i < 54; i++) {
+  for (uint8_t i = 52; i < 54; i++) {
     int onValue;
     switch (i) {
       case 52: onValue = B00000001; break;
@@ -814,7 +891,7 @@ void generateFramesFromConfig() {
     setFramePixelValue(rightFrame, 3, onValue, config.bluePixels[i]);
   }
 
-  for (int i = 54; i < 62; i++) {
+  for (uint8_t i = 54; i < 62; i++) {
     int onValue;
     switch (i-54) {
       case 0: onValue = B00000001; break;
@@ -829,7 +906,7 @@ void generateFramesFromConfig() {
     setFramePixelValue(rightFrame, 2, onValue, config.bluePixels[i]);
   }
 
-  for (int i = 62; i < 68; i++) {
+  for (uint8_t i = 62; i < 68; i++) {
     int onValue;
     switch (i-62) {
       case 0: onValue = B00000001; break;
@@ -843,7 +920,7 @@ void generateFramesFromConfig() {
   }
 
   // LEFT SIDE
-  for (int i = 68; i < 74; i++) {
+  for (uint8_t i = 68; i < 74; i++) {
     int onValue;
     switch (i-68) {
       case 0: onValue = B01000000; break;
@@ -857,7 +934,7 @@ void generateFramesFromConfig() {
   }
   setFramePixelValue(leftFrame, 0, B00000001, config.bluePixels[70]);
 
-  for (int i = 74; i < 82; i++) {
+  for (uint8_t i = 74; i < 82; i++) {
     int onValue;
     switch (i-74) {
       case 0: onValue = B10000000; break;
@@ -872,7 +949,7 @@ void generateFramesFromConfig() {
     setFramePixelValue(leftFrame, 2, onValue, config.bluePixels[i]);
   }
 
-  for (int i = 82; i < 84; i++) {
+  for (uint8_t i = 82; i < 84; i++) {
     int onValue;
     switch (i) {
       case 82: onValue = B00010000; break;
@@ -881,7 +958,7 @@ void generateFramesFromConfig() {
     setFramePixelValue(leftFrame, 3, onValue, config.bluePixels[i]);
   }
 
-  for (int i = 84; i < 120; i++) {
+  for (uint8_t i = 84; i < 120; i++) {
     int byteNumber;
     byteNumber = (i-4) / 4;
     int bitNumber;
@@ -894,7 +971,7 @@ void generateFramesFromConfig() {
     setFramePixelValue(leftFrame, frameByteNumber, onValue, config.bluePixels[i]);
   }
 
-  for (int i = 120; i < 122; i++) {
+  for (uint8_t i = 120; i < 122; i++) {
     int onValue;
     switch (i) {
       case 120: onValue = B00100000; break;
@@ -903,7 +980,7 @@ void generateFramesFromConfig() {
     setFramePixelValue(leftFrame, 13, onValue, config.bluePixels[i]);
   }
 
-  for (int i = 122; i < 130; i++) {
+  for (uint8_t i = 122; i < 130; i++) {
     int onValue;
     switch (i-122) {
       case 0: onValue = B10000000; break;
@@ -918,7 +995,7 @@ void generateFramesFromConfig() {
     setFramePixelValue(leftFrame, 14, onValue, config.bluePixels[i]);
   }
 
-  for (int i = 130; i < 135; i++) {
+  for (uint8_t i = 130; i < 135; i++) {
     int onValue;
     switch (i-130) {
       case 0: onValue = B10000000; break;
@@ -934,16 +1011,19 @@ void generateFramesFromConfig() {
 }
 
 // void setFramePixelValue(int frameSide[8][16], int byteNumber, int bitMask, int value) {
-void setFramePixelValue(uint8_t frameSide[8][16], int byteNumber, int bitMask, int value) {
+void setFramePixelValue(DisplayFrame frameSide, int byteNumber, int bitMask, int value) {
 
-  for (int greyLevel = 0; greyLevel < SHADE_OF_GREY_COUNT; greyLevel++) {
+  // Serial.println(value);
+  for (uint8_t greyLevel = 0; greyLevel < config.shadesOfGrey; greyLevel++) {
     if (value > greyLevel) { // ints are for shades of gray (later)
-      // frameSide[byteNumber] |= bitMask;
       frameSide[greyLevel][byteNumber] |= bitMask;
+      // Serial.print("enable: ");
+      // Serial.println(byteToString(bitMask));
     }
     else {
-      // frameSide[byteNumber] &= bitMask ^ B11111111;
       frameSide[greyLevel][byteNumber] &= bitMask ^ B11111111;
+      // Serial.print("disable: ");
+      // Serial.println(byteToString(bitMask));
     }
   }
 }
@@ -960,7 +1040,7 @@ void stopHandlingSerialCommand() {
 
 String byteToString(int value) {
   String out;
-  for (int i = 7; i >= 0; i--) {
+  for (uint8_t i = 7; i >= 0; i--) {
       bool b = bitRead(value, i);
       out += b ? '1' : '0';
   }
@@ -968,14 +1048,14 @@ String byteToString(int value) {
   return out;
 }
 
-int parseBitsOrInt(String serialString) {
-  int length = serialString.length();
-  int result = 0;
+uint8_t parseBitsOrInt(String serialString) {
+  uint8_t length = serialString.length();
+  uint8_t result = 0;
   if (length <= 3) {
     result = serialString.toInt();
   }
   else if (length == 8) {
-    for(int i = 0; i < length; i++ ) {
+    for(uint8_t i = 0; i < length; i++ ) {
       // char c = serialString[i];
       // char incomingBytes [1] = {
       //   serialString[i]
@@ -991,245 +1071,3 @@ int parseBitsOrInt(String serialString) {
 
   return result;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// !!!!!!!!!!!!!!!! LEGACY CODE
-
-
-/** /
-
-int startingTime = millis();
-int startingPeriodTime = millis();
-int lastHighVoltage = millis();
-
-int serial1val = 0;
-
-
-
-
-bool display = true; // left
-int spiPeriod = 999; // ms
-int lat = 2; // loops
-int latPeriodCounter = 0; // periods
-
-int animationPeriod = 5; // ms
-int animationPeriodCounter = 0; // periods
-
-int middleLightCounter = 0;
-int loopsPerMsCounter = 0;
-int loopsPerMs = 0;
-int loopsPerPeriodCounter = 0;
-
-void loopBak() {
-
-  // readPins();
-  // Serial1.println(0);
-    // Serial1.println(serial1val);
-  // SPI.transfer(255);
-
-
-  // clockEveryMS(digitalPin11, 1, false);
-  // clockEveryMS(digitalPin11, 300, true);
-
-  if(Serial.available() > 0) {
-    // String configString = Serial.readStringUntil(':');
-    // frameValues[0] = parseBitsOrInt(configString);
-
-    frameLength = 0;
-    while (String numericValue = Serial.readStringUntil(':')) {
-      // frameValues[i] = Serial.parseInt();
-      // ;
-      if (numericValue == "") {
-        break;
-      }
-      frameValues[frameLength] = parseBitsOrInt(numericValue);
-      frameSentValues[frameLength] = frameValues[frameLength];
-      frameLength++;
-    }
-
-    serialInput = Serial.readStringUntil('\n');
-
-    // analogWrite(digitalPin3, frameValues[0]);    // J_LAT  ??    vert  980Hz
-
-    printLine(
-      "Period: ", frameValues[0],
-      "\nLat: ", frameValues[1],
-      "\nLength: ", frameLength - frameStart
-    );
-
-    spiPeriod = frameValues[0];
-    lat = frameValues[1];
-
-    // for (int i = 1; i < frameLength; i++) {
-    //   printLine(
-    //     i, ": ", frameValues[i]
-    //   );
-    //   // Serial.print(i);
-    //   // Serial.print(frameValues[i]);
-    //   // Serial.print(", ");
-    // }
-
-    // SPI.transfer(&frameSentValues[1], frameLength);
-
-    // analogWrite(digitalPin3, 1);    // J_LAT  ??    vert  980Hz
-    // analogWrite(digitalPin6, lat);    // J_LAT  ??    vert  980Hz
-  }
-
-
-  int loopTime = millis();
-  int timeDiff = loopTime - startingPeriodTime;
-  loopsPerMsCounter++;
-  if (timeDiff > 1) {
-    loopsPerMs = loopsPerMsCounter;
-    loopsPerMsCounter = 0;
-    startingPeriodTime = loopTime;
-  }
-
-  loopsPerPeriodCounter++;
-  if (loopsPerPeriodCounter == spiPeriod) {
-    loopsPerPeriodCounter = 0;
-  }
-
-  // if (timeDiff > spiPeriod || spiPeriod == 0 || loopsPerMsCounter <= 1) {
-  if (loopsPerMsCounter <= spiPeriod) {
-    // printLine("Diff: ", loopTime - startingPeriodTime, " ms");
-    // printLine("leftSide: ", leftSide);
-    // startingPeriodTime = loopTime;
-    // printLine(startingPeriodTime, "ms");
-    int mask=0;
-    int mask2;
-    // if (displaySide == DISPLAY_LEFT) {
-    //   displaySide == DISPLAY_RIGHT;
-    //   mask = 191;
-    //   mask2 = 170; // only red or blue
-    // }
-    // else if (displaySide == DISPLAY_RIGHT) {
-    //   displaySide == DISPLAY_MIDDLE;
-    //   mask = 223;
-    //   mask2 = 85; // only red or blue
-    // }
-    // else if (displaySide == DISPLAY_MIDDLE) {
-      displaySide == DISPLAY_LEFT;
-      for (int i = 0; i < 16; i++) {
-        int valueToTransfer = middleFrame[i];
-        if (i == 0 || i == 1 || i == 15) {
-          valueToTransfer = middleFrame[i] & frameValues[i + frameStart];
-        }
-        SPI.transfer(valueToTransfer);
-      }
-      return;
-    // }
-
-
-    // if (latPeriodCounter < lat / 2) {
-    //   digitalWrite(digitalPin6, LOW);
-    //   // digitalWrite(digitalPin6, HIGH);
-    // }
-    // else if (latPeriodCounter >= lat / 2) {
-    //   // digitalWrite(digitalPin6, LOW);
-    //   digitalWrite(digitalPin6, HIGH);
-    // }
-
-    // latPeriodCounter++;
-    // if (latPeriodCounter >= lat) {
-    //   latPeriodCounter = 0;
-    // }
-
-
-
-
-    // frameSentValues[1] = frameValues[1] & mask;
-    // frameSentValues[5] = frameValues[5] & mask2;
-    // frameSentValues[9] = frameValues[9] & mask2;
-    // SPI.transfer(&frameSentValues[1], frameLength-1);
-
-
-    for (int i = frameStart; i < frameLength; i++) {
-
-
-      int valueToTransfer = frameValues[i];
-      if (i == frameStart + 0) {
-        valueToTransfer &= mask;
-      }
-
-      if (i == frameStart + 4 || i == frameStart + 8 ) {
-        valueToTransfer &= mask2;
-      }
-
-      // Serial.print(i);
-      // Serial.print(": ");
-      // Serial.print(valueToTransfer);
-      // Serial.print(", ");
-
-      SPI.transfer(valueToTransfer);
-    }
-    // Serial.print("\n");
-    // printLine(middleLightCounter); // 64/ms
-    middleLightCounter = 0;
-  }
-  // else {
-  //   middleLightCounter++;
-  //   if (middleLightCounter == 350) {
-  //     for (int i = 0; i < 16; i++) {
-  //       int valueToTransfer = middleFrame[i];
-  //       if (i == 0 || i == 1 || i == 15) {
-  //         valueToTransfer = middleFrame[i] & frameValues[i + frameStart];
-  //       }
-  //       SPI.transfer(valueToTransfer);
-  //     }
-  //   }
-  // }
-
-
-    // https://makersportal.com/blog/2019/12/15/controlling-arduino-pins-from-the-serial-monitor
-
-  /*
-  if (Serial.available()){
-    char in_char = Serial.read();
-    int in_int = (int)in_char;
-    in_int =  in_int * 2;
-    // Serial.println(in_char);
-    printLine(
-      // "Printing: A", in_char, " to J_LAT "
-      "Printing: ", in_char, " / ", in_int, " to J_LAT "
-    );
-    // analogWrite(digitalPin3, in_int); // J_LAT 980Hz
-    // digitalWrite(digitalPin3, in_int); // J_LAT 980Hz
-    // analogWrite(digitalPin6, in_int); // J_LAT 980Hz
-
-
-    // digitalWrite(digitalPin6, HIGH); // J_LAT 980Hz
-    // delayMicroseconds(1020); // 1 / 980s
-    // digitalWrite(digitalPin6, in_int); // J_LAT 980Hz
-    if (digitalPinsState[digitalPin6] == HIGH) {
-      // printLine("digital pin:", i, " => ", digitalPinsState[i]);
-      digitalPinsState[digitalPin6] = LOW;
-    }
-    else {
-      digitalPinsState[digitalPin6] = HIGH;
-    }
-    digitalWrite(digitalPin6, digitalPinsState[digitalPin6]);
-
-  }
-  else {
-    // delayMicroseconds(1020); // 1 / 980s
-    // analogWrite(digitalPin3, 0); // J_LAT 980Hz
-  }
-}
-
-
-
-/**/
