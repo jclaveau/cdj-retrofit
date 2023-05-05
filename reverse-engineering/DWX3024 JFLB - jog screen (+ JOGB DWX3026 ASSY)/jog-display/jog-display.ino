@@ -1,5 +1,3 @@
-// #include <Regexp.h>
-
 // https://playground.arduino.cc/Code/TaskScheduler/
 // https://github.com/arkhipenko/TaskScheduler/wiki/API-Task#void-setinterval-unsigned-long-ainterval
 #define _TASK_MICRO_RES
@@ -16,22 +14,20 @@
 typedef void (*NoParamFunction) ();
 String blankString;
 
-const uint8_t SHADE_OF_GREY_COUNT = 16; // Bug over 27 on Arduino Leonardo
+const uint8_t SHADE_OF_GREY_COUNT = 8; // Bug over 27 on Arduino Leonardo
 const uint8_t DISPLAY_FRAME_LENGTH = 16;
 typedef uint8_t DisplayFrame[SHADE_OF_GREY_COUNT][DISPLAY_FRAME_LENGTH];
-
-// const bool BLINK_ON = LOW;
-// const bool BLINK_OFF = HIGH;
 
 const bool BLINK_ON = HIGH;
 const bool BLINK_OFF = LOW;
 
 
-void printLine()
-{
-  Serial.println();
-}
+// void printLine()
+// {
+//   Serial.println();
+// }
 
+// TODO remove this and fix build
 template <typename T, typename... Types>
 void printLine(T first, Types... other)
 {
@@ -125,10 +121,12 @@ struct Config {
   int circleOut[2];
   int bluePixels[143];
   int redPixels[88];
+  double animationInterval;
+  uint8_t maxFrameUpdateStep;
 } config = {
   200, // full render period
   // 50, 50,
-  1, 100,
+  100, 1,
   SHADE_OF_GREY_COUNT, // TODO fix it
   // {4, 4, 2},
   {5, 5, 0},
@@ -140,20 +138,21 @@ struct Config {
   {SHADE_OF_GREY_COUNT, SHADE_OF_GREY_COUNT},
   0,
   0,
+  0 // animation interval (0 = disabled)
 };
 
 
 void dumpConfigToSerial() {
-  Serial.println(blankString +
-      "renderPeriod: " + config.renderPeriod + "ms\n"
-    + "blinkOnDuration: " + config.blinkOnDuration + "ms\n"
-    + "blinkOffDuration: " + config.blinkOffDuration + "ms\n"
-    + "shadesOfGrey: " + config.shadesOfGrey + "\n"
-    + "latency: " + config.latencySpacing + ", " + config.latencyDuration + "us\n"
-    + "vinyl: " + config.vinyl[0] + " " + config.vinyl[1] + "\n"
-    + "circleIn: " + config.circleIn[0] + " " + config.circleIn[1] + "\n"
-    + "circleOut: " + config.circleOut[0] + " " + config.circleOut[1] + "\n"
-  );
+
+  Serial.println(blankString + "renderPeriod: " + config.renderPeriod + "ms");
+  Serial.println(blankString + "blinkOnDuration: " + config.blinkOnDuration + "ms");
+  Serial.println(blankString + "blinkOffDuration: " + config.blinkOffDuration + "ms");
+  Serial.println(blankString + "shadesOfGrey: " + config.shadesOfGrey);
+  Serial.println(blankString + "latency: " + config.latencySpacing + ", " + config.latencyDuration + "us");
+  Serial.println(blankString + "vinyl: " + config.vinyl[0] + " " + config.vinyl[1]);
+  Serial.println(blankString + "circleIn: " + config.circleIn[0] + " " + config.circleIn[1]);
+  Serial.println(blankString + "circleOut: " + config.circleOut[0] + " " + config.circleOut[1]);
+  Serial.println(blankString + "animation interval: " + config.animationInterval + "us");
 
   // Serial.print("bluePixels: "); Serial.println(config.bluePixels);
   // Serial.print("redPixels: "); Serial.println(config.redPixels);
@@ -183,6 +182,8 @@ int blinkOnEndTime = 0;
 int blinkOffStartTime = 0;
 int blinkOffEndTime = 0;
 int currentRenderStartTime = 0;
+int animationStartTime = 0;
+int animationEndTime = 0;
 
 int renderLeftStartTimeTmp = 0;
 int renderLeftEndTimeTmp = 0;
@@ -190,20 +191,27 @@ int blinkOnStartTimeTmp = 0;
 int blinkOnEndTimeTmp = 0;
 int blinkOffStartTimeTmp = 0;
 int blinkOffEndTimeTmp = 0;
+int animationStartTimeTmp = 0;
+int animationEndTimeTmp = 0;
 uint8_t renderCount=0;
 
+const uint8_t FRAME_UPDATE_STEPS = 58;
+int frameUpdateDurations[FRAME_UPDATE_STEPS];
 
 void renderJogDisplayLeft() {
   currentRenderStartTime = micros();
-  digitalWrite(13, BLINK_ON);
   renderDisplayTask.delay(config.blinkOffDuration);
 
+  digitalWrite(13, BLINK_ON);
   renderLeftStartTime = renderLeftStartTimeTmp;
   renderLeftEndTime = renderLeftEndTimeTmp;
   blinkOnStartTime = blinkOnStartTimeTmp;
   blinkOnEndTime = blinkOnEndTimeTmp;
   blinkOffStartTime = blinkOffStartTimeTmp;
   blinkOffEndTime = blinkOffEndTimeTmp;
+
+  generateFramesFromConfig();
+
 
   renderLeftStartTimeTmp = micros();
 
@@ -223,6 +231,7 @@ void renderJogDisplayLeft() {
 void renderJogDisplayRight() {
   digitalWrite(13, BLINK_ON);
   renderDisplayTask.delay(config.blinkOffDuration);
+  generateFramesFromConfig();
   renderDisplayTask.setCallback(blink);
   // afterBlinkStep = renderJogDisplayLeft;
   afterBlinkStep = renderMiddlePixels;
@@ -242,6 +251,7 @@ void renderJogDisplayRight() {
  */
 void renderMiddlePixels() {
   digitalWrite(13, BLINK_ON);
+  generateFramesFromConfig();
   renderDisplayTask.setCallback(blink);
   renderDisplayTask.delay(config.blinkOffDuration);
   afterBlinkStep = renderJogDisplayLeft;
@@ -318,7 +328,6 @@ void startLatency() {
     return;
   }
   digitalWrite(6, HIGH);
-  // // printLine("Latency started");
   renderDisplayTask.delay(config.latencyDuration);
   if (config.latencyDuration <= 13) {
     stopLatency();
@@ -338,17 +347,20 @@ void startLatency() {
 }
 
 void stopLatency() {
-  // delay(500);
   digitalWrite(6, LOW);
-  // // printLine("Latency stopped");
   renderDisplayTask.setCallback(blink);
-  // renderDisplayTask.delay(16000);
 }
 
 uint8_t animationStep = 0;
 bool animationDirection = true;
 void startAnimation() {
-  // return;
+  if (config.animationInterval == 0) {
+    return;
+  }
+  animationTask.delay(config.animationInterval);
+
+  animationStartTimeTmp = micros();
+
   if (animationDirection) {
     config.circleIn[0] = animationStep;
     config.circleIn[1] = config.shadesOfGrey - animationStep;
@@ -357,7 +369,7 @@ void startAnimation() {
     config.circleIn[0] = config.shadesOfGrey - animationStep;
     config.circleIn[1] = animationStep;
   }
-  generateFramesFromConfig();
+
   if (animationStep == config.shadesOfGrey) {
     animationDirection = !animationDirection;
     animationStep = 0;
@@ -365,6 +377,8 @@ void startAnimation() {
   else {
     animationStep++;
   }
+  animationStartTime = animationStartTimeTmp;
+  animationEndTime = micros();
 }
 
 void stopAnimation() {
@@ -447,16 +461,24 @@ void handleSerialCommand() {
     // return;
 
     if (command == "time") {
+
       Serial.print(blankString +
           "Render duration left: " + (blinkOnStartTime - renderLeftStartTime) + " us\n"
         + "Blink duration: " + (currentRenderStartTime - blinkOnStartTime) + " us\n"
+        + "Animation duration: " + (animationEndTime - animationStartTime) + " us\n"
+        + "Frame update durations (" + FRAME_UPDATE_STEPS + " / " + config.maxFrameUpdateStep + "): \n"
       );
+
+      for (uint8_t i = 0; i < FRAME_UPDATE_STEPS; i++) {
+        Serial.print(blankString + i + ": " + frameUpdateDurations[i] + "us \n");
+      }
+
     }
     else if (command == "dump") {
-      printLine("Left Frames: ");
+      Serial.println("Left Frames: ");
       dumpFrameToSerial(leftFrame);
 
-      printLine("Right Frames: ");
+      Serial.println("Right Frames: ");
       dumpFrameToSerial(rightFrame);
     }
     else if (command == "config") {
@@ -523,31 +545,24 @@ void handleSerialCommand() {
     else if (command == "blue_pixels") {
       String list = readSerialStringUntil(serialLine, '\n');
       uint8_t length = parseCommandRange(list, config.bluePixels);
-
-
-      // uint8_t length = parseCommandList((char *) list.c_str(), config.bluePixels);
-      // if (length == -1) {
-      //   length = parseCommandRange((char *) list.c_str(), config.bluePixels);
-      // }
+      // TODO
+      // + split parsing command and saving values
+      // + save a list of values
     }
     else if (command == "red_pixels") {
       String list = readSerialStringUntil(serialLine, '\n');
-
       uint8_t length = parseCommandRange(list, config.redPixels);
-
-      // uint8_t length = parseCommandList((char *) list.c_str(), config.redPixels);
-      // if (length == -1) {
-      //   length = parseCommandRange((char *) list.c_str(), config.redPixels);
-      // }
     }
 
-    generateFramesFromConfig();
+    else if (command == "animation") {
+      String value = readSerialStringUntil(serialLine, '\n');
+      config.animationInterval = value.toDouble();
+    }
 
     if (command == "frame") {
       int inputLength = 0;
       while (String numericValue = readSerialStringUntil(serialLine, ':')) {
         numericValue.trim();
-        // printLine("numericValue: ", numericValue);
         if (numericValue == "") {
           break;
         }
@@ -565,7 +580,7 @@ void handleSerialCommand() {
 
 
 
-// MatchState ms;
+// TODO split between command layer and vaue update layer
 int parseCommandRange(String commandString, int * values) {
 
   Serial.println(blankString + "parseCommandRange: " +  commandString);
@@ -588,14 +603,6 @@ int parseCommandRange(String commandString, int * values) {
 
   Serial.println(blankString + "Range:" + start + " => " +  end + ": " + value);
 
-  // char buffer[20];
-  // ms.GetMatch(buffer);
-  // start = atoi(ms.GetCapture(buffer, 0));
-  // end = atoi(ms.GetCapture(buffer, 1));
-  // value = atoi(ms.GetCapture(buffer, 2));
-
-  // printLine("Range:", start, " => ", end, ": ", value);
-
   for (int i = start; i < end; i++) {
     values[i] = value;
   }
@@ -604,113 +611,9 @@ int parseCommandRange(String commandString, int * values) {
 }
 
 
-// MatchState ms;
-// int parseCommandRange(char * commandString, int * values) {
-//   ms.Target(commandString);
 
-//   // start => end: value
-//   char result = ms.Match("%s*(%d+)%s*=>%s*(%d+)%s*:%s*(%d+)", 0);
-//   int start = 0;
-//   int end = 0;
-//   int value = 0;
-//   printLine(commandString);
-//   printLine("Range:", start, " => ", end, ": ", value);
-//   if (result != REGEXP_MATCHED) {
-//     printLine("No match");
-//     return -1;
-//   }
-
-//   char buffer[20];
-//   ms.GetMatch(buffer);
-//   start = atoi(ms.GetCapture(buffer, 0));
-//   end = atoi(ms.GetCapture(buffer, 1));
-//   value = atoi(ms.GetCapture(buffer, 2));
-
-//   printLine("Range:", start, " => ", end, ": ", value);
-
-//   for (int i = start; i < end; i++) {
-//     values[i] = value;
-//   }
-
-//   return end - start;
-// }
-
-
-
-
-
-/**
- * Parse a command string like YY[XX,XX,XX] then save XX values
- * at the offset YY into the 'values' parameter.
- *
- * Returns the length of the array change.
- * Returns -1 if the commandString doesn't match the array+offset pattern
- */
-// int parseCommandList(char * commandString, int * values) {
-//   ms.Target(commandString);
-
-//   // Extracting offset
-//   char offsetResult = ms.Match ("%s*(%d+)", 0);
-//   int offset = 0;
-//   if (offsetResult == REGEXP_MATCHED) {
-//     char offsetBuffer [4];
-//     ms.GetMatch(offsetBuffer);
-//     offset = atoi(ms.GetCapture (offsetBuffer, 0));
-//   }
-
-//   // Extracting array values
-//   char arrayResult = ms.Match(
-//     "%s*%[%s*([^%]]+)%]",
-//     ms.MatchStart + ms.MatchLength
-//   );
-
-//   if (arrayResult != REGEXP_MATCHED) {
-//     return -1;
-//   }
-
-//   char arrayBuffer [136];
-//   ms.GetMatch(arrayBuffer);
-//   const char * arrayPart = ms.GetCapture(arrayBuffer, 0);
-
-//   // printLine("offset: ", offset);
-//   // printLine("arrayPart: ", arrayPart);
-
-//   // Extracting array values
-//   ms.Target((char *) arrayPart);
-//   int index = 0;
-//   int i = 0;
-//   char valueResult;
-//   char valueBuffer[8];
-//   do {
-//     valueResult = ms.Match ("(%d+)%s*,?%s*", index);
-//     if (valueResult == REGEXP_MATCHED) {
-//       // Serial.println(ms.GetMatch(valueBuffer));
-//       // printLine("Captures: ", ms.level);
-//       ms.GetMatch(valueBuffer);
-//       for (int j = 0; j < ms.level; j++) {
-//         values[offset + i] = parseBitsOrInt(ms.GetCapture(valueBuffer, j));
-//         i++;
-//       }
-//       index = ms.MatchStart + ms.MatchLength;
-//     }
-//   }
-//   while (valueResult == REGEXP_MATCHED);
-
-//   return i;
-// }
-
-
-
-
-void generateFramesFromConfig() {
-
-  // TODO
-  // + prerender 8 => 16 frames with shade of grey applied
-  // + render each frame with a delay
-  // + Sync the blink with the render
-
-
-  // VINYL
+void updateFirstByte() {
+   // VINYL
   setFramePixelValue(leftFrame,  0, B00001000, config.vinyl[0]);
   setFramePixelValue(rightFrame, 0, B00001000, config.vinyl[1]);
 
@@ -721,13 +624,9 @@ void generateFramesFromConfig() {
   // CIRCLE OUT
   setFramePixelValue(leftFrame,  0, B00000010, config.circleOut[0]);
   setFramePixelValue(rightFrame, 0, B00000010, config.circleOut[1]);
+}
 
-  // return;
-
-  // RED PIXELS
-  // Byte 0 => 4 mid bottom pixels
-  // Byte 9 => 4 mid up pixels
-
+void updateRightRedPixelsByte_13() {
   // The top middle pixel (i=0) is shared between two sides so it must be
   // set on both frames to be at full light
   setFramePixelValue(rightFrame, 13, B00001000, config.redPixels[0]);
@@ -742,8 +641,12 @@ void generateFramesFromConfig() {
     }
     setFramePixelValue(rightFrame, 13, onValue, config.redPixels[i]);
   }
+}
 
-  for (uint8_t i = 4; i < 40; i++) { // Right side
+void updateRight44RedPixelsByte(uint8_t start, uint8_t end) {
+  // bytes 4 => 12
+  // for (uint8_t i = 4; i < 40; i++) {
+  for (uint8_t i = start; i < end; i++) {
     // Red bytes are B10101010
     uint8_t byteNumber;
     byteNumber = i / 4;
@@ -753,10 +656,12 @@ void generateFramesFromConfig() {
     uint8_t frameByteNumber;
     frameByteNumber = 11 - byteNumber;
     frameByteNumber += 2; // skip blue only bytes
-    int onValue = B00000010 << (bitNumber * 2);
+    uint8_t onValue = B00000010 << (bitNumber * 2);
     setFramePixelValue(rightFrame, frameByteNumber, onValue, config.redPixels[i]);
   }
+}
 
+void updateRightRedPixelsByte_3() {
   for (uint8_t i = 40; i < 43; i++) {
     // i = 40, 41, 42 (3 last right pixels)
     int onValue;
@@ -767,7 +672,9 @@ void generateFramesFromConfig() {
     }
     setFramePixelValue(rightFrame, 3, onValue, config.redPixels[i]);
   }
+}
 
+void updateLeftRedPixelsByte_3() {
   for (uint8_t i = 43; i < 46; i++) {
     // i = 43, 44, 45 (3 first left pixels)
     int onValue;
@@ -779,8 +686,12 @@ void generateFramesFromConfig() {
 
     setFramePixelValue(leftFrame, 3, onValue, config.redPixels[i]);
   }
+}
 
-  for (uint8_t i = 46; i < 82; i++) {
+void updateLeft44RedPixelsByte(uint8_t start, uint8_t end) {
+  // bytes 4 => 12
+  // for (uint8_t i = 46; i < 82; i++) {
+  for (uint8_t i = start; i < end; i++) {
     // Left side. As there are 86 red pixels, we need an offset of 2
     // to apply masks by byte
     uint8_t byteNumber;
@@ -806,11 +717,11 @@ void generateFramesFromConfig() {
 
       setFramePixelValue(leftFrame, frameByteNumber, onValue, config.redPixels[i]);
     }
-    // else {
-    //   printLine("ERROR: unhandled byte for red pixels ", byteNumber);
-    // }
   }
+}
 
+
+void updateLeftRedPixelsByte_13() {
   for (uint8_t i = 82; i < 85; i++) {
     // i = 43, 44, 45 (3 first left pixels)
     int onValue;
@@ -823,15 +734,11 @@ void generateFramesFromConfig() {
 
     setFramePixelValue(leftFrame, 13, onValue, config.redPixels[i]);
   }
+}
 
 
 
-  // BLEU PIXELS
-  // The top middle pixel (i=0) is shared between two sides so it must be
-  // set on both frames to be at full light
-  setFramePixelValue(rightFrame, 15, B00000100, config.bluePixels[0]);
-  setFramePixelValue(leftFrame, 15, B00000100, config.bluePixels[0]);
-
+void updateRightBluePixelsByte_15() {
   for (uint8_t i = 1; i < 6; i++) {
     int onValue;
     switch (i) {
@@ -843,9 +750,12 @@ void generateFramesFromConfig() {
     }
     setFramePixelValue(rightFrame, 15, onValue, config.bluePixels[i]);
   }
+}
 
-  for (uint8_t i = 6; i < 14; i++) {
-    int onValue;
+void updateRightBluePixelsByte_14(uint8_t start, uint8_t end) {
+  // for (uint8_t i = 6; i < 14; i++) {
+  for (uint8_t i = start; i < end; i++) {
+    uint8_t onValue;
     switch (i-6) {
       case 0: onValue = B00000001; break;
       case 1: onValue = B00000010; break;
@@ -858,30 +768,38 @@ void generateFramesFromConfig() {
     }
     setFramePixelValue(rightFrame, 14, onValue, config.bluePixels[i]);
   }
+}
 
+void updateRightBluePixelsByte_13() {
   for (uint8_t i = 14; i < 16; i++) {
-    int onValue;
+    uint8_t onValue;
     switch (i-14) {
       case 0: onValue = B00000100; break;
       case 1: onValue = B00100000; break;
     }
     setFramePixelValue(rightFrame, 13, onValue, config.bluePixels[i]);
   }
+}
 
-  for (uint8_t i = 16; i < 52; i++) {
-    int byteNumber;
+void updateRight44BluePixelsByte(uint8_t start, uint8_t end) {
+  // bytes 4 => 12
+  // for (uint8_t i = 16; i < 52; i++) {
+  for (uint8_t i = start; i < end; i++) {
+    uint8_t byteNumber;
     byteNumber = (i-12) / 4;
-    int bitNumber;
+    uint8_t bitNumber;
     bitNumber = (i-12) & B00000011;
 
-    int frameByteNumber;
+    uint8_t frameByteNumber;
     frameByteNumber = 11 - byteNumber;
     frameByteNumber += 2; // skip blue only bytes
     // Blue bytes are B01010101
-    int onValue = B00000001 << (bitNumber * 2);
+    uint8_t onValue = B00000001 << (bitNumber * 2);
     setFramePixelValue(rightFrame, frameByteNumber, onValue, config.bluePixels[i]);
   }
+}
 
+void updateRightBluePixelsByte_3() {
   for (uint8_t i = 52; i < 54; i++) {
     int onValue;
     switch (i) {
@@ -890,9 +808,12 @@ void generateFramesFromConfig() {
     }
     setFramePixelValue(rightFrame, 3, onValue, config.bluePixels[i]);
   }
+}
 
-  for (uint8_t i = 54; i < 62; i++) {
-    int onValue;
+void updateRightBluePixelsByte_2(uint8_t start, uint8_t end) {
+  // for (uint8_t i = 54; i < 62; i++) {
+  for (uint8_t i = start; i < end; i++) {
+    uint8_t onValue;
     switch (i-54) {
       case 0: onValue = B00000001; break;
       case 1: onValue = B00000010; break;
@@ -905,7 +826,9 @@ void generateFramesFromConfig() {
     }
     setFramePixelValue(rightFrame, 2, onValue, config.bluePixels[i]);
   }
+}
 
+void updateRightBluePixelsByte_1() {
   for (uint8_t i = 62; i < 68; i++) {
     int onValue;
     switch (i-62) {
@@ -918,8 +841,12 @@ void generateFramesFromConfig() {
     }
     setFramePixelValue(rightFrame, 1, onValue, config.bluePixels[i]);
   }
+}
 
-  // LEFT SIDE
+
+void updateLeftBluePixelsByte_0_1() {
+  setFramePixelValue(leftFrame, 0, B00000001, config.bluePixels[70]);
+
   for (uint8_t i = 68; i < 74; i++) {
     int onValue;
     switch (i-68) {
@@ -932,9 +859,11 @@ void generateFramesFromConfig() {
     }
     setFramePixelValue(leftFrame, 1, onValue, config.bluePixels[i]);
   }
-  setFramePixelValue(leftFrame, 0, B00000001, config.bluePixels[70]);
+}
 
-  for (uint8_t i = 74; i < 82; i++) {
+void updateLeftBluePixelsByte_2(uint8_t start, uint8_t end) {
+  // for (uint8_t i = 74; i < 82; i++) {
+  for (uint8_t i = start; i < end; i++) {
     int onValue;
     switch (i-74) {
       case 0: onValue = B10000000; break;
@@ -948,7 +877,9 @@ void generateFramesFromConfig() {
     }
     setFramePixelValue(leftFrame, 2, onValue, config.bluePixels[i]);
   }
+}
 
+void updateLeftBluePixelsByte_3() {
   for (uint8_t i = 82; i < 84; i++) {
     int onValue;
     switch (i) {
@@ -957,30 +888,41 @@ void generateFramesFromConfig() {
     }
     setFramePixelValue(leftFrame, 3, onValue, config.bluePixels[i]);
   }
+}
 
-  for (uint8_t i = 84; i < 120; i++) {
-    int byteNumber;
+void updateLeft44BluePixelsByte(uint8_t start, uint8_t end) {
+  // bytes 4 => 12
+  // for (uint8_t i = 84; i < 120; i++) {
+  for (uint8_t i = start; i < end; i++) {
+    uint8_t byteNumber;
     byteNumber = (i-4) / 4;
-    int bitNumber;
+    uint8_t bitNumber;
     bitNumber = (i-4) & B00000011;
 
-    int frameByteNumber;
+    uint8_t frameByteNumber;
     frameByteNumber = byteNumber - 16;
     // Blue bytes are B01010101
-    int onValue = B01000000 >> (bitNumber * 2);
+    uint8_t onValue = B01000000 >> (bitNumber * 2);
     setFramePixelValue(leftFrame, frameByteNumber, onValue, config.bluePixels[i]);
   }
+}
 
+
+
+void updateLeftBluePixelsByte_13() {
   for (uint8_t i = 120; i < 122; i++) {
-    int onValue;
+    uint8_t onValue;
     switch (i) {
       case 120: onValue = B00100000; break;
       case 121: onValue = B00000100; break;
     }
     setFramePixelValue(leftFrame, 13, onValue, config.bluePixels[i]);
   }
+}
 
-  for (uint8_t i = 122; i < 130; i++) {
+void updateLeftBluePixelsByte_14(uint8_t start, uint8_t end) {
+  // for (uint8_t i = 122; i < 130; i++) {
+  for (uint8_t i = start; i < end; i++) {
     int onValue;
     switch (i-122) {
       case 0: onValue = B10000000; break;
@@ -994,7 +936,9 @@ void generateFramesFromConfig() {
     }
     setFramePixelValue(leftFrame, 14, onValue, config.bluePixels[i]);
   }
+}
 
+void updateLeftBluePixelsByte_15() {
   for (uint8_t i = 130; i < 135; i++) {
     int onValue;
     switch (i-130) {
@@ -1006,8 +950,231 @@ void generateFramesFromConfig() {
     }
     setFramePixelValue(leftFrame, 15, onValue, config.bluePixels[i]);
   }
+}
 
-  /**/
+
+uint8_t updateStep = 0;
+void generateFramesFromConfig() {
+  int frameUpdateStartTimeTmp = micros();
+  // Serial.println(blankString + "generateFramesFromConfig: " + updateStep);
+
+  updateStep++;
+  uint8_t onStep = 0;
+
+  if (updateStep == (onStep += 1)) {
+    // Serial.println(blankString + "updateFirstByte");
+    updateFirstByte();
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRightRedPixelsByte_13();
+  }
+
+  else if (updateStep == (onStep += 1)) {
+    // updateRightRedPixelsByte_4_12();
+    updateRight44RedPixelsByte(4, 8);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateRightRedPixelsByte_4_12();
+    updateRight44RedPixelsByte(8, 12);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateRightRedPixelsByte_4_12();
+    updateRight44RedPixelsByte(12, 16);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateRightRedPixelsByte_4_12();
+    updateRight44RedPixelsByte(16, 20);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateRightRedPixelsByte_4_12();
+    updateRight44RedPixelsByte(20, 24);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateRightRedPixelsByte_4_12();
+    updateRight44RedPixelsByte(24, 28);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateRightRedPixelsByte_4_12();
+    updateRight44RedPixelsByte(28, 32);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateRightRedPixelsByte_4_12();
+    updateRight44RedPixelsByte(32, 36);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateRightRedPixelsByte_4_12();
+    updateRight44RedPixelsByte(36, 40);
+  }
+
+  else if (updateStep == (onStep += 1)) {
+    updateRightRedPixelsByte_3();
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeftRedPixelsByte_3();
+  }
+
+  else if (updateStep == (onStep += 1)) {
+    // updateLeftRedPixelsByte_4_12();
+    updateLeft44RedPixelsByte(46, 50);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateLeftRedPixelsByte_4_12();
+    updateLeft44RedPixelsByte(50, 54);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateLeftRedPixelsByte_4_12();
+    updateLeft44RedPixelsByte(54, 58);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateLeftRedPixelsByte_4_12();
+    updateLeft44RedPixelsByte(58, 62);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateLeftRedPixelsByte_4_12();
+    updateLeft44RedPixelsByte(62, 66);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateLeftRedPixelsByte_4_12();
+    updateLeft44RedPixelsByte(66, 70);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateLeftRedPixelsByte_4_12();
+    updateLeft44RedPixelsByte(70, 74);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateLeftRedPixelsByte_4_12();
+    updateLeft44RedPixelsByte(74, 78);
+  }
+  else if (updateStep == (onStep += 1)) {
+    // updateLeftRedPixelsByte_4_12();
+    updateLeft44RedPixelsByte(78, 82);
+  }
+
+  else if (updateStep == (onStep += 1)) {
+    updateLeftRedPixelsByte_13();
+  }
+  else if (updateStep == (onStep += 1)) {
+    // The top middle pixel (i=0) is shared between two sides so it must be
+    // set on both frames to be at full light
+    setFramePixelValue(rightFrame, 15, B00000100, config.bluePixels[0]);
+    setFramePixelValue(leftFrame, 15, B00000100, config.bluePixels[0]);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRightBluePixelsByte_15();
+  }
+  else if (updateStep == (onStep += 1)) {
+  // for (uint8_t i = 6; i < 14; i++) {
+    updateRightBluePixelsByte_14(6, 10);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRightBluePixelsByte_14(10, 14);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRightBluePixelsByte_13();
+  }
+
+  else if (updateStep == (onStep += 1)) {
+    updateRight44BluePixelsByte(16, 20);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRight44BluePixelsByte(20, 24);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRight44BluePixelsByte(24, 28);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRight44BluePixelsByte(28, 32);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRight44BluePixelsByte(32, 36);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRight44BluePixelsByte(36, 40);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRight44BluePixelsByte(40, 44);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRight44BluePixelsByte(44, 48);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRight44BluePixelsByte(48, 52);
+  }
+
+  else if (updateStep == (onStep += 1)) {
+    updateRightBluePixelsByte_3();
+  }
+  else if (updateStep == (onStep += 1)) { // 39
+    // for (uint8_t i = 54; i < 62; i++) {
+    updateRightBluePixelsByte_2(54, 58);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRightBluePixelsByte_2(58, 62);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateRightBluePixelsByte_1();
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeftBluePixelsByte_0_1();
+  }
+  else if (updateStep == (onStep += 1)) { // ~43
+    // for (uint8_t i = 74; i < 82; i++) {
+    updateLeftBluePixelsByte_2(74, 78);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeftBluePixelsByte_2(78, 82);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeftBluePixelsByte_3();
+  }
+
+  else if (updateStep == (onStep += 1)) {
+    updateLeft44BluePixelsByte(84, 88);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeft44BluePixelsByte(88, 92);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeft44BluePixelsByte(92, 96);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeft44BluePixelsByte(96, 100);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeft44BluePixelsByte(100, 104);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeft44BluePixelsByte(104, 108);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeft44BluePixelsByte(108, 112);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeft44BluePixelsByte(112, 116);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeft44BluePixelsByte(116, 120);
+  }
+
+  else if (updateStep == (onStep += 1)) {
+    updateLeftBluePixelsByte_13();
+  }
+  else if (updateStep == (onStep += 1)) {
+  // for (uint8_t i = 122; i < 130; i++) {
+    updateLeftBluePixelsByte_14(122, 126);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeftBluePixelsByte_14(126, 130);
+  }
+  else if (updateStep == (onStep += 1)) {
+    updateLeftBluePixelsByte_15();
+  }
+  else {
+    config.maxFrameUpdateStep = onStep;
+    updateStep = 0;
+  }
+
+  frameUpdateDurations[updateStep] = micros() - frameUpdateStartTimeTmp;
 }
 
 // void setFramePixelValue(int frameSide[8][16], int byteNumber, int bitMask, int value) {
